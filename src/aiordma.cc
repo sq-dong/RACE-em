@@ -559,7 +559,8 @@ void rdma_server::start_serve(std::function<task<>(rdma_conn*)> handler, int wor
     local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     assert_require(::bind(listenfd, (sockaddr *)&local_addr, sizeof(sockaddr)) != -1);
-    assert_require(::listen(listenfd, 5) != -1);
+    // backlog 过小（原为 5）时，多 client 同时建连易 ECONNREFUSED
+    assert_require(::listen(listenfd, 512) != -1);
 
     if (handler)
     {

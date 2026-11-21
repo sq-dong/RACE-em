@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# 查看 SCALE=paper 后台进度
+set -euo pipefail
+REPRO="$(cd "$(dirname "$0")" && pwd)"
+LOG=$(ls -t "$REPRO"/results/logs/run_all_paper_*.log 2>/dev/null | head -1 || true)
+echo "=== processes ==="
+ps aux | grep -E 'run_all\.sh|ser_cli' | grep -v grep || echo '(none)'
+echo
+echo "=== main log: ${LOG:-none} ==="
+[[ -n "${LOG:-}" ]] && tail -30 "$LOG"
+echo
+echo "=== csv rows ==="
+for f in "$REPRO"/results/*.csv; do
+  [[ -f "$f" ]] || continue
+  printf '%5d  %s\n' "$(wc -l <"$f")" "$(basename "$f")"
+done
+echo
+CLT=$(ls -t "$REPRO"/results/logs/race_*.log "$REPRO"/results/logs/sephash_*.log 2>/dev/null | head -1 || true)
+if [[ -n "${CLT:-}" ]]; then
+  echo "=== latest client log: $CLT ==="
+  tail -15 "$CLT"
+fi
