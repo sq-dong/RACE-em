@@ -17,9 +17,12 @@
 #define ORDERED_INSERT
 Config config;
 uint64_t load_num;
-using ClientType = SEPHASH::Client;
-using ServerType = SEPHASH::Server;
-using Slice = SEPHASH::Slice;
+// using ClientType = SEPHASH::Client;
+// using ServerType = SEPHASH::Server;
+// using Slice = SEPHASH::Slice;
+using ClientType = RACE::Client;
+using ServerType = RACE::Server;
+using Slice = RACE::Slice;
 
 constexpr uint64_t key_len = 2;
 constexpr uint64_t value_len = 4096;
@@ -94,10 +97,11 @@ task<> run(Generator *gen, Client *cli, uint64_t cli_id, uint64_t coro_id)
         op_frac = op_chooser();
         if (op_frac < config.insert_frac)
         {
+            // 新 key 按客户端划分、互不重叠，避免并发 insert 撞 key 导致 split 活锁 / MAX_DEPTH
             GenKey(load_num +
                        (config.machine_id * config.num_cli * config.num_coro + cli_id * config.num_coro + coro_id) *
-                           load_avr +
-                       gen->operator()(key_chooser()),
+                           num_op +
+                       i,
                    tmp_key);
             co_await cli->insert(&key, &value);
         }
@@ -252,6 +256,11 @@ int main(int argc, char *argv[])
         printf("Load IOPS:%.2lfKops\n", op_cnt / duration);
         fflush(stdout);
         // ths[config.num_cli].join();
+
+        if (config.machine_id == 0)
+        {
+            rdma_clis[0]->run(((ClientType *)clis[0])->cal_utilization());
+        }
 
         printf("Run start\n");
         auto op_per_coro = config.num_op / (config.num_machine * config.num_cli * config.num_coro);

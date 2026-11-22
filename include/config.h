@@ -1,11 +1,14 @@
 #pragma once
 #include <stdint.h>
+#include <string>
 #include "cmdline.h"
 
 struct Config
 {
     bool is_server;
-    const char *server_ip;
+    // 必须自持有字符串：不可对临时 std::string 取 c_str()，否则悬空导致 connect 随机失败
+    std::string server_ip_str;
+    const char *server_ip{nullptr};
     uint64_t num_machine;
     uint64_t machine_id;
     uint64_t num_cli;
@@ -51,7 +54,8 @@ struct Config
         cmd_parser.parse_check(argc, argv);
 
         is_server = cmd_parser.exist("server");
-        server_ip = cmd_parser.get<std::string>("server_ip").c_str();
+        server_ip_str = cmd_parser.get<std::string>("server_ip");
+        server_ip = server_ip_str.c_str();
         num_machine = cmd_parser.get<uint64_t>("num_machine");
         num_cli = cmd_parser.get<uint64_t>("num_cli");
         num_coro = cmd_parser.get<uint64_t>("num_coro");
@@ -81,7 +85,7 @@ struct Config
     {
         printf("Configuraion\n");
         printf("is_server                 = %s\n", is_server ? "true" : "false");
-        printf("server_ip                 = %s\n", server_ip);
+        printf("server_ip                 = %s\n", server_ip ? server_ip : "(null)");
         printf("machine_id                 = %lu\n", machine_id);
         printf("gid_idx                 = %lu\n", gid_idx);
         printf("max_coro                 = %ld\n", max_coro);
