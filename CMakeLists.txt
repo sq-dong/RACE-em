@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.0.2)
-SET(CMAKE_CXX_COMPILER "/usr/bin/g++-13")
+# Compiler via cmake -DCMAKE_CXX_COMPILER=... (repro/lib.sh:
+# memserver16 → g++-11, bfhost_72 → g++-13).
 project(MyIndex)
 set(CMAKE_CXX_FLAGS "-O3") # -march=native
 # set(CMAKE_CXX_FLAGS "-g -O0") # -march=native
@@ -16,7 +17,7 @@ link_directories(
   /opt/intel/oneapi/mkl/latest/lib/intel64
 )
 
-# 现在改为手动编译search.cc为.s，再手动删除vzeroupper后编成.o
+# Build search.cc to .s manually, strip vzeroupper, then assemble to .o
 # add_library(search OBJECT "src/search.cc")
 # set_target_properties(search PROPERTIES COMPILE_FLAGS "-O3 -march=native")
 

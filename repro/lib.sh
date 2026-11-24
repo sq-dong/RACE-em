@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# 公共：同步、编译、启停 server、跑 client、解析日志
+# Shared helpers: sync, build, start/stop server, run client, parse logs
+# Cluster: memserver16 (mlx5_2) + bfhost_72 (mlx5_0)
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
 SERVER_PID_FILE="${RESULTS_DIR}/.server.pid"
@@ -9,7 +10,7 @@ SERVER_FIFO="${RESULTS_DIR}/.server.stdin"
 SERVER_LOG="${RESULTS_DIR}/logs/server.log"
 
 ensure_race_sources() {
-  # 确保本地已切到 RACE（幂等）
+  # Ensure local tree uses RACE ClientType (idempotent)
   local f
   for f in "$SRV_SRC/test/ser_cli.cc" "$SRV_SRC/test/ser_cli_var_kv.cc"; do
     if ! grep -q 'using ClientType = RACE::Client;' "$f"; then
@@ -23,14 +24,49 @@ ensure_race_sources() {
   done
 }
 
+# Pin Server/Client to Active IB devices on this cluster (idempotent)
+pin_ib_devices_local() {
+  local srv_dev="${SRV_IBDEV}"
+  local clt_dev="${CLT_IBDEV}"
+  # RACE/other Server: nullptr picks mlx5_0(Down); must set explicitly
+  while IFS= read -r -d '' f; do
+    sed -i -E \
+      -e "s/dev\(nullptr, 1, config\.gid_idx\)/dev(\"${srv_dev}\", 1, config.gid_idx)/g" \
+      -e "s/dev\(\"(mlx5_[0-9]+)\", 1, config\.gid_idx\)/dev(\"${srv_dev}\", 1, config.gid_idx)/g" \
+      "$f"
+  done < <(find "$SRV_SRC/src" -name '*.cc' -print0)
+  # Client NIC hard-coded (runs on bfhost_72)
+  sed -i -E \
+    "s/rdma_dev dev\(\"(mlx5_[0-9]+)\"/rdma_dev dev(\"${clt_dev}\"/g" \
+    "$SRV_SRC/test/ser_cli.cc" "$SRV_SRC/test/ser_cli_var_kv.cc"
+  # Allow up to 96+ clients (was ths[80])
+  sed -i -E 's/std::thread ths\[[0-9]+\];/std::thread ths[128];/' \
+    "$SRV_SRC/test/ser_cli.cc" "$SRV_SRC/test/ser_cli_var_kv.cc"
+  log "pin IB: server=$srv_dev client=$clt_dev"
+}
+
+ensure_cmake_fresh_if_compiler_changed() {
+  local cxx want
+  cxx="$(pick_cxx)"
+  if [[ -f "$SRV_BUILD/CMakeCache.txt" ]]; then
+    want="$(grep -E '^CMAKE_CXX_COMPILER:' "$SRV_BUILD/CMakeCache.txt" | head -1 || true)"
+    if [[ -n "$want" && "$want" != *"$cxx"* ]]; then
+      log "compiler changed -> wipe $SRV_BUILD"
+      rm -rf "$SRV_BUILD"
+    fi
+  fi
+}
+
 build_local() {
   local targets="${1:-$BIN_FIXED $BIN_VAR}"
   ensure_race_sources
+  pin_ib_devices_local
+  ensure_cmake_fresh_if_compiler_changed
   mkdir -p "$SRV_BUILD"
   (
     cd "$SRV_BUILD"
     if [[ ! -f Makefile ]]; then
-      cmake "$SRV_SRC"
+      cmake -DCMAKE_CXX_COMPILER="$(pick_cxx)" "$SRV_SRC"
     fi
     # shellcheck disable=SC2086
     make -j"$(nproc)" $targets
@@ -38,40 +74,66 @@ build_local() {
   log "local build ok: $targets"
 }
 
+rsync_with_retry() {
+  local try
+  remote "$CLT_HOST" "mkdir -p '$CLT_SRC'"
+  for try in 1 2 3 4 5; do
+    log "rsync -> $CLT_HOST:$CLT_SRC (try $try)"
+    if rsync -az --delete \
+      --exclude build --exclude .git --exclude 'repro/results' \
+      "$SRV_SRC/" "$CLT_HOST:$CLT_SRC/"; then
+      return 0
+    fi
+    log "rsync failed (try $try), sleep $((try * 5))s"
+    sleep $((try * 5))
+  done
+  log "rsync failed after retries"
+  return 1
+}
+
 sync_and_build_client() {
   local targets="${1:-$BIN_FIXED $BIN_VAR}"
-  log "rsync -> $CLT_HOST:$CLT_SRC"
-  rsync -az --delete \
-    --exclude build --exclude .git --exclude 'repro/results' \
-    "$SRV_SRC/" "$CLT_HOST:$CLT_SRC/"
-
-  remote "$CLT_HOST" "bash -s" <<EOF
-set -euo pipefail
-cd '$CLT_SRC'
-# client 网卡
-sed -i 's/rdma_dev dev("mlx5_0"/rdma_dev dev("mlx5_3"/' test/ser_cli.cc test/ser_cli_var_kv.cc || true
-# g++-13 on Ubuntu 24.04
-if [[ -x /usr/bin/g++-13 ]]; then
-  sed -i 's|/usr/bin/g++-11|/usr/bin/g++-13|' CMakeLists.txt || true
-fi
-# RACE
-for f in test/ser_cli.cc test/ser_cli_var_kv.cc; do
-  sed -i \\
-    -e 's/using ClientType = SEPHASH::Client;/using ClientType = RACE::Client;/' \\
-    -e 's/using ServerType = SEPHASH::Server;/using ServerType = RACE::Server;/' \\
-    -e 's/using Slice = SEPHASH::Slice;/using Slice = RACE::Slice;/' \\
-    "\$f"
-done
-mkdir -p build && cd build
-if [[ ! -f Makefile ]]; then
-  if [[ -x /usr/bin/g++-13 ]]; then
-    cmake -DCMAKE_CXX_COMPILER=g++-13 ..
-  else
-    cmake ..
+  if [[ "${SKIP_SYNC:-0}" == "1" ]]; then
+    log "SKIP_SYNC=1: reuse existing $CLT_HOST:$CLT_BUILD/$BIN_FIXED (no rsync/rebuild)"
+    remote "$CLT_HOST" "test -x '$CLT_BUILD/$BIN_FIXED'" || {
+      log "missing client binary $CLT_BUILD/$BIN_FIXED"
+      return 1
+    }
+    return 0
   fi
+  rsync_with_retry || return 1
+
+  local remote_sh="$RESULTS_DIR/.client_build.sh"
+  cat >"$remote_sh" <<'REMOTE_EOF'
+set -euo pipefail
+CLT_SRC="$1"
+CLT_IBDEV="$2"
+TARGETS="$3"
+cd "$CLT_SRC"
+sed -i -E "s/rdma_dev dev\(\"(mlx5_[0-9]+)\"/rdma_dev dev(\"${CLT_IBDEV}\"/g" \
+  test/ser_cli.cc test/ser_cli_var_kv.cc || true
+sed -i -E 's/std::thread ths\[[0-9]+\];/std::thread ths[128];/' \
+  test/ser_cli.cc test/ser_cli_var_kv.cc || true
+if [[ -x /usr/bin/g++-13 ]]; then CXX_BIN=/usr/bin/g++-13
+elif [[ -x /usr/bin/g++-11 ]]; then CXX_BIN=/usr/bin/g++-11
+else CXX_BIN=g++
 fi
-make -j"\$(nproc)" $targets
-EOF
+for f in test/ser_cli.cc test/ser_cli_var_kv.cc; do
+  sed -i \
+    -e 's/using ClientType = SEPHASH::Client;/using ClientType = RACE::Client;/' \
+    -e 's/using ServerType = SEPHASH::Server;/using ServerType = RACE::Server;/' \
+    -e 's/using Slice = SEPHASH::Slice;/using Slice = RACE::Slice;/' \
+    "$f"
+done
+rm -rf build
+mkdir -p build && cd build
+cmake -DCMAKE_CXX_COMPILER="${CXX_BIN}" ..
+# shellcheck disable=SC2086
+make -j"$(nproc)" $TARGETS
+REMOTE_EOF
+  # shellcheck disable=SC2086
+  scp $SSH_OPTS "$remote_sh" "$CLT_HOST:/tmp/sephash_client_build.sh"
+  remote "$CLT_HOST" "bash /tmp/sephash_client_build.sh '$CLT_SRC' '$CLT_IBDEV' '$targets'"
   log "client build ok on $CLT_HOST"
 }
 
@@ -81,7 +143,7 @@ port_listening() {
   ss -lnt 2>/dev/null | awk -v p=":$SERVER_PORT" '$4 ~ p"$" {found=1} END{exit !found}'
 }
 
-# TCP 探测：确认 accept 循环已起来（init 日志在 listen 之前，不能单靠它）
+# TCP probe: accept loop is up (init logs before listen; do not rely on logs alone)
 tcp_probe() {
   local host="${1:-127.0.0.1}"
   timeout 1 bash -c "echo >/dev/tcp/${host}/${SERVER_PORT}" 2>/dev/null
@@ -108,7 +170,7 @@ stop_server() {
     kill -9 "$(cat "$SERVER_KEEPER_PID_FILE" 2>/dev/null)" 2>/dev/null || true
     rm -f "$SERVER_KEEPER_PID_FILE"
   fi
-  # 兜底：按命令行 / 端口清理
+  # Fallback: clean by cmdline / port
   pkill -f "/${BIN_FIXED} --server" 2>/dev/null || true
   pkill -f "/${BIN_VAR} --server" 2>/dev/null || true
   fuser -k "${SERVER_PORT}/tcp" 2>/dev/null || true
@@ -123,10 +185,10 @@ start_server() {
   : >"$SERVER_LOG"
   rm -f "$SERVER_FIFO"
   mkfifo "$SERVER_FIFO"
-  log "start server bin=$bin mem=$MEM_SIZE gid=$GID_IDX port=$SERVER_PORT"
+  log "start server bin=$bin mem=$MEM_SIZE gid=$GID_IDX dev=$SRV_IBDEV port=$SERVER_PORT"
   (
     cd "$SRV_BUILD"
-    # RACE::Server 用 cin.get() 等退出；必须保持 stdin 打开且不送 EOF
+    # RACE::Server waits on cin.get(); keep stdin open and do not send EOF
     stdbuf -oL -eL "./$bin" --server \
       --gid_idx "$GID_IDX" \
       --max_coro 256 --cq_size 64 \
@@ -134,7 +196,7 @@ start_server() {
       <"$SERVER_FIFO" >>"$SERVER_LOG" 2>&1 &
     echo $! >"$SERVER_PID_FILE"
   )
-  # 打开 FIFO 写端并挂起，阻止读端收到 EOF
+  # Hold FIFO write end open so the reader does not see EOF
   ( exec 3>"$SERVER_FIFO"; sleep infinity ) &
   echo $! >"$SERVER_KEEPER_PID_FILE"
 
@@ -149,9 +211,9 @@ start_server() {
       saw_init=1
       log "server init logged (${i}s), waiting for listen :$SERVER_PORT ..."
     fi
-    # 必须端口在听，并且本机 TCP 能连上（避免 init 早于 listen 的竞态）
+    # Port must listen and local TCP connect must succeed (avoid init-before-listen race)
     if port_listening && tcp_probe 127.0.0.1; then
-      # 再探一次 RoCE IP（client 实际连这个）
+      # Probe RoCE/IB IP again (what the client connects to)
       if tcp_probe "$SRV_IP" || tcp_probe 127.0.0.1; then
         log "server ready (${i}s) listening :$SERVER_PORT"
         sleep 1
@@ -166,7 +228,7 @@ start_server() {
   return 1
 }
 
-# client 连不上时自动重启 server 再试一次
+# If client cannot connect, restart server once and retry
 run_client_retry() {
   local logfile=$1; shift
   local bin=$1; shift
@@ -186,14 +248,13 @@ run_client_retry() {
   return 1
 }
 
-# 跑一次 client，日志写入 $1；其余参数传给二进制
-# 用法: run_client_logged <logfile> <bin> --server_ip ... 
+# Run one client; log to $1; remaining args go to the binary
+# Usage: run_client_logged <logfile> <bin> --server_ip ...
 run_client_logged() {
   local logfile=$1; shift
   local bin=$1; shift
   mkdir -p "$(dirname "$logfile")"
   log "client: $bin $*"
-  # 在 client 机 cwd=build，便于 lat 文件落盘
   remote "$CLT_HOST" "bash -s" <<EOF
 set -euo pipefail
 cd '$CLT_BUILD'
@@ -205,7 +266,6 @@ stdbuf -oL -eL ./'$bin' \\
   --num_machine 1 --machine_id 0 \\
   "$@"
 EOF
-  # 上面 "$@" 在 heredoc 里不会展开本地参数——需换写法
 }
 
 run_client() {
@@ -224,7 +284,7 @@ run_client() {
     }
 }
 
-# 从 client 日志解析指标 → 打印 key=value 行（供实验脚本采集）
+# Parse metrics from client log → print key=value lines for experiment scripts
 parse_client_log() {
   local logfile=$1
   python3 - "$logfile" <<'PY'
@@ -249,7 +309,7 @@ print(f"entry_util={entry_util}")
 print(f"space_util={space_util}")
 print(f"entry_cnt={entry_cnt}")
 print(f"entry_total={entry_total}")
-# Kops → Mops；平均时延 µs ≈ duration_ms*1000/num_op（由调用方再算）
+# Kops → Mops; mean latency µs ≈ duration_ms*1000/num_op (caller computes)
 if run_kops != "":
     print(f"run_mops={float(run_kops)/1000.0}")
 if load_kops != "":
@@ -269,7 +329,7 @@ csv_row() {
   (IFS=,; echo "$*") >>"$file"
 }
 
-# 设置变长 value 大小并重编（两端）
+# Set variable value size and rebuild (both ends)
 set_varlen_and_rebuild() {
   local vlen=$1
   local klen="${2:-2}"
@@ -280,4 +340,40 @@ set_varlen_and_rebuild() {
     "$SRV_SRC/test/ser_cli_var_kv.cc"
   build_local "$BIN_VAR"
   sync_and_build_client "$BIN_VAR"
+}
+
+# Preflight: SSH / IPoIB / NIC state
+preflight() {
+  if [[ "${SKIP_PREFLIGHT:-0}" == "1" ]]; then
+    log "SKIP_PREFLIGHT=1"
+    return 0
+  fi
+  log "preflight: SSH $CLT_HOST"
+  remote "$CLT_HOST" "hostname; (nproc || true); (ibdev2netdev || true) | head -5" || true
+  log "preflight: ping IB $SRV_IP"
+  if ! ping -c1 -W2 "$SRV_IP" >/dev/null; then
+    log "WARN: cannot ping $SRV_IP (IPoIB?)"
+  fi
+  if ! remote "$CLT_HOST" "ping -c1 -W2 '$SRV_IP' >/dev/null 2>&1"; then
+    log "WARN: client cannot ping $SRV_IP (tool/disk may be broken)"
+  fi
+  local st
+  st="$(ibdev2netdev 2>/dev/null | grep "$SRV_IBDEV" || true)"
+  log "local IB: $st"
+  if [[ "$st" != *"(Up)"* ]]; then
+    log "ERROR: $SRV_IBDEV not Up on memserver16"
+    return 1
+  fi
+  st="$(remote "$CLT_HOST" "ibdev2netdev 2>/dev/null | grep '$CLT_IBDEV' || true")"
+  log "client IB: $st"
+  if [[ "$st" != *"(Up)"* ]]; then
+    # Even if client userspace tools fail (RO disk), ser_cli may still run
+    if remote "$CLT_HOST" "test -x '$CLT_BUILD/$BIN_FIXED'"; then
+      log "WARN: cannot confirm $CLT_IBDEV Up, but client binary exists — continue"
+    else
+      log "ERROR: $CLT_IBDEV not Up on $CLT_HOST and no client binary"
+      return 1
+    fi
+  fi
+  log "preflight ok"
 }

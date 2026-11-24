@@ -12,7 +12,7 @@ inline __attribute__((always_inline)) uint64_t get_seg_loc(uint64_t pattern, uin
     return ((pattern) & ((1 << global_depth) - 1));
 }
 
-Server::Server(Config &config) : dev(nullptr, 1, config.gid_idx), ser(dev)
+Server::Server(Config &config) : dev("mlx5_2", 1, config.gid_idx), ser(dev)
 {
     seg_mr = dev.reg_mr(233, config.mem_size);
     auto [dm, mr] = dev.reg_dmmr(234, dev_mem_size);

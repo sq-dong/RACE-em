@@ -1,93 +1,65 @@
-# RACE / SepHash 实验复现（server02 + server03）
+# RACE / SepHash experiment reproduction (memserver16 + bfhost_72)
 
-用 SepHash 仓库里的 **RACE** 实现，在双机 RoCEv2 上尽量对齐：
+Reproduce **RACE** (USENIX ATC'21 / TOS) style figures using the RACE implementation in this SepHash tree on a two-node InfiniBand cluster.
 
-- **RACE**（USENIX ATC’21 / TOS）：Fig.10–13 一类（时延、吞吐扩展、hybrid、变长 KV）
-- **SepHash**（VLDB’24）论文中 **RACE 作为基线** 的 Fig.12 / 14 / 17
+Pilaf / FaRM / DrTM / CLevel / Plush are not runnable here; plots show RACE curves only. Axis titles and layout follow the paper for side-by-side comparison.
 
-Pilaf / FaRM / DrTM / CLevel / Plush **本仓没有可跑实现**，图里只画 RACE 曲线；版式（轴标题、多子图布局、横轴刻度）按论文来，方便并排对比。
+## Cluster topology
 
-## 快速开始
+| Role | Host | Mgmt | IB | Device | GID |
+|------|------|------|-----|--------|-----|
+| Memory / server | memserver16 | local | 10.10.1.16 | mlx5_2 | 0 |
+| Client | bfhost_72 | SSH | 10.10.1.72 | mlx5_0 | 0 |
+
+On memserver16, `mlx5_0` is often Down — do not use `dev(nullptr)`. Repro scripts pin Active devices.
+
+## Quick start
 
 ```bash
-# 在 server02 上
-cd /home/dsq/SepHash/repro
-
-# 1) 冒烟（分钟～十几分钟）
-SCALE=smoke MEM_SIZE=$((32*1024*1024*1024)) ./run_all.sh
-
-# 2) 默认中等规模（小时级，推荐先跑这个）
-SCALE=medium ./run_all.sh
-
-# 3) 尽量对齐论文量级（load 1e8 / op 1e7，可能十余小时）
-SCALE=paper MEM_SIZE=$((80*1024*1024*1024)) ./run_all.sh
-
-# 只跑子集
-EXPTS="race_tput race_ycsb" SCALE=medium ./run_all.sh
-
-# 已有 CSV，只出图
+# On memserver16
+cd repro
+./check_env.sh
+SCALE=medium ./run_all.sh          # default, hours
+SCALE=paper  ./run_all.sh          # load 1e8 / op 1e7, may take >10h
+EXPTS="race_tput race_ycsb" ./run_all.sh
 ./run_all.sh --plot-only
 ```
 
-结果：
+| Path | Content |
+|------|---------|
+| `results/*.csv` | Metrics |
+| `results/figures/*.pdf` / `*.png` | Plots |
 
-| 路径 | 内容 |
-|------|------|
-| `results/*.csv` | 原始指标 |
-| `results/logs/` | 每次 client 完整日志 |
-| `results/figures/*.pdf` / `*.png` | 自动出图 |
+Client sources sync to `bfhost_72:/tmp/dongshuqi/SepHash` (home often full).
 
-client 代码同步到 **`server03:/tmp/dsq/SepHash`**（`/home` 常满，见 `docs/SEPHASH_RACE_SERVER02_03.md`）。
+See `env.sh` for `SRV_IP`, `CLT_HOST`, `GID_IDX`, `SRV_IBDEV`, `CLT_IBDEV`, `MEM_SIZE`, `CLT_SRC`.
 
-## 实验与论文图对应
+## Experiments vs paper figures
 
-| `EXPTS` 名 | 脚本 | 对齐目标 | 本双机能做什么 | 做不到 / 近似 |
-|------------|------|----------|----------------|---------------|
-| `race_tput` | `experiments/race_tput.sh` | RACE **Fig.11** 四分图：insert/search/update/delete 吞吐 vs #clients | 扫线程数；`SCALE=paper` 到 **64**（论文到 128） | 无 4 台 client 机；无对比基线 |
-| `race_hybrid` | `race_hybrid.sh` | RACE **Fig.12** search/insert 比 | 最大线程数下扫 10/90…90/10 | 论文 load 9e7+128 clients → 用 SCALE 的 LOAD_NUM + max clients |
-| `race_latency` | `race_latency.sh` | RACE **Fig.10** 时延 vs load factor | 1 线程；x 轴优先 **entry_utilization**（load 后 `cal_utilization`） | 无逐请求 `USE_PERF` 分布，用 wall-clock 平均 µs |
-| `race_varlen` | `race_varlen.sh` | RACE **Fig.13** 变长 value | `ser_cli_var_kv`，16B key，扫 value 64…8K | 大 value 自动降 load，防 OOM |
-| `race_ycsb` | `race_ycsb.sh` | SepHash **Fig.17** YCSB A–D | A/B/C zipfian；D latest | 仅 RACE 柱 |
-| `sephash_insert` | `sephash_insert.sh` | SepHash **Fig.12** insert 扩展 | 用 **load 阶段** Mops 作从空表写入吞吐 | 无 SepHash/CLevel/Plush 同图对比 |
-| `sephash_hybrid` | `sephash_hybrid.sh` | SepHash **Fig.14** insert:search | 1:9…9:1 | 同上 |
+| `EXPTS` | Script | Target | Notes |
+|---------|--------|--------|-------|
+| `race_tput` | `experiments/race_tput.sh` | RACE Fig.11 throughput vs #clients | `SCALE=paper` up to 128 (slight oversubscribe on 96 cores) |
+| `race_hybrid` | `race_hybrid.sh` | RACE Fig.12 search/insert mix | Sweep ratios at max clients |
+| `race_latency` | `race_latency.sh` | RACE Fig.10 latency vs load | 1 client; x-axis `entry_utilization`; also `fig_race_latency_by_load` |
+| `race_varlen` | `race_varlen.sh` | RACE Fig.13 variable value size | `ser_cli_var_kv`; `RESUME=1` fills missing points |
+| `race_ycsb` | `race_ycsb.sh` | SepHash Fig.17 YCSB A–D | RACE bars only |
+| `sephash_insert` | `sephash_insert.sh` | SepHash Fig.12 insert scale | Optional; not in default `EXPTS` |
+| `sephash_hybrid` | `sephash_hybrid.sh` | SepHash Fig.14 insert:search | Optional |
 
-### 明确不可复现（缺代码或缺硬件）
+Not reproducible here: associativity sweep, Pilaf/FaRM/DrTM curves, multi-machine 128 physical clients, SRCD cache ablation.
 
-- RACE **最大 load factor vs associativity**（需改 `SLOT_PER_BUCKET` 并改插入失败语义；现实现会 split）
-- RACE 与 Pilaf / FaRM hopscotch / DrTM 的对比曲线
-- SepHash 本体 / CLevel / Plush 同图（把 `ClientType` 切回去可另跑，但不在本默认流水线）
-- SRCD cache on/off 消融（无编译开关）
-- 论文 5/8 机 IB、128 物理 client 进程满配
+## SCALE
 
-## SCALE 参数
+| SCALE | load / op | clients | Use |
+|-------|-----------|---------|-----|
+| `smoke` | 1e5 / 2e4 | 1,2,4 | Script check |
+| `medium` | 1e7 / 1e6 | 1…64 | Daily repro |
+| `paper` | 1e8 / 1e7 | 1…128 | Paper-aligned load/op/client axis |
 
-| SCALE | load / op（主实验） | client 扫 | 用途 |
-|-------|---------------------|-----------|------|
-| `smoke` | 1e5 / 2e4 | 1,2,4 | 验证脚本 |
-| `medium` | 1e7 / 1e6 | 1…32 | 日常复现 |
-| `paper` | 1e8 / 1e7 | 1…64 | 尽量贴论文 |
+## Known fix (already in `test/ser_cli*.cc`)
 
-环境变量见 `env.sh`：`SRV_IP`、`CLT_HOST`、`GID_IDX`、`MEM_SIZE`、`CLT_SRC` 等。
+Original `run()` sampled insert keys with `gen()`, so multi-client runs collided and RACE concurrent split could hit `Exceed MAX_DEPTH`. Insert keys in the run phase are partitioned by `(machine,cli,coro)`.
 
-## 已知实现问题（已在 test 入口规避）
+## Plotting
 
-SepHash 原版 `run()` 里 **insert 的新 key 用 `gen()` 采样**，多 client 会撞同一 key，RACE 并发 split 可能一直升 `global_depth` 直到 `Exceed MAX_DEPTH` 并 `exit(-1)`（YCSB-D / 纯 insert run 易中招）。
-
-复现分支已改为：run 阶段 insert 按 `(machine,cli,coro)` **划分互不重叠的新 key**（与 load 分区方式一致）。请用本仓当前 `test/ser_cli*.cc` 再编。
-
----
-
-## 出图说明
-
-`plot_all.py` 读 CSV，风格为白底 + 网格 + RACE 单曲线（蓝、圆点），轴标题尽量用论文用语（如 `Throughput (M reqs/s)`、`Search/Insertion Ratio (%)`）。
-
-绝对 Mops **不必**与论文重合（RoCE vs IB、双机 vs 多机、CPU/DRAM 不同）；看趋势与相对形状。
-
-## 目录
-
-```
-repro/
-  env.sh lib.sh run_all.sh plot_all.py README.md
-  experiments/*.sh
-  results/{*.csv,logs/,figures/}
-```
+`plot_all.py` reads CSV (white background, grid, RACE single series). Absolute Mops need not match the paper (IB vs RoCE, 2 nodes vs many); compare trends.

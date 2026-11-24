@@ -31,7 +31,9 @@ run_one() {
   csv_row "$OUT_CSV" "$name" "$pat" "$fi" "$fr" "$fu" "$fd" "$NCLI" "$YCSB_LOAD" "$YCSB_OP" "${run_mops:-}" "${run_ms:-}" "${entry_util:-}" "$SCALE"
 }
 
-run_one A 2 0.0 0.5 0.5 0.0
+# Matches ser_cli.sh / SepHash Fig.17 comments:
+# A: 50% insert + 50% read (zipf)；B: 95% read + 5% update；C: 100% read；D: 5% insert + 95% read (latest)
+run_one A 2 0.5 0.5 0.0 0.0
 run_one B 2 0.0 0.95 0.05 0.0
 run_one C 2 0.0 1.0 0.0 0.0
 run_one D 3 0.05 0.95 0.0 0.0

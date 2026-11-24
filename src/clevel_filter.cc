@@ -48,7 +48,7 @@ uint64_t* FilterCache::get_filter(uint64_t level_ptr, uint64_t buc_id)
     return nullptr;
 }
 
-Server::Server(Config &config) : dev(nullptr, 1, config.gid_idx), ser(dev)
+Server::Server(Config &config) : dev("mlx5_2", 1, config.gid_idx), ser(dev)
 {
     seg_mr = dev.reg_mr(233, config.mem_size);
     auto [dm, mr] = dev.reg_dmmr(234, dev_mem_size);

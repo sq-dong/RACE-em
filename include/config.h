@@ -6,7 +6,7 @@
 struct Config
 {
     bool is_server;
-    // 必须自持有字符串：不可对临时 std::string 取 c_str()，否则悬空导致 connect 随机失败
+    // Own the IP string: do not c_str() a temporary std::string (dangling → flaky connect)
     std::string server_ip_str;
     const char *server_ip{nullptr};
     uint64_t num_machine;
@@ -20,7 +20,7 @@ struct Config
     uint64_t num_op;
     uint64_t read_size;
     uint64_t load_num;
-    char work_load; // YCSB : a,b,c,d; e有scan,f有RMW，暂时不弄了
+    char work_load; // YCSB a,b,c,d; e=scan, f=RMW (unused)
 
     // Internel States For YCSB
     uint64_t pattern_type; // Seq : 0 , Uniform : 1 , Zipfian : 2 , Latest : 3
@@ -34,14 +34,15 @@ struct Config
         cmdline::parser cmd_parser;
         cmd_parser.add("server", 'a', "Is a server or client");
         cmd_parser.add<std::string>("server_ip", 'b', "IP address of server", false);
-        cmd_parser.add<uint64_t>("num_cli", 'c', "Number of client", false, 4, cmdline::range(1, 80));
-        cmd_parser.add<uint64_t>("num_machine", 'd', "Number of client", false, 4, cmdline::range(1, 80));
+        // Raise range to 256 so paper-scale can use 128 clients (was capped at 80)
+        cmd_parser.add<uint64_t>("num_cli", 'c', "Number of client", false, 4, cmdline::range(1, 256));
+        cmd_parser.add<uint64_t>("num_machine", 'd', "Number of client", false, 4, cmdline::range(1, 256));
         cmd_parser.add<uint64_t>("gid_idx", 'e', "gid index");
         cmd_parser.add<uint64_t>("max_coro", 'f', "Number of max coroutine in each thread", false, 256);
         cmd_parser.add<uint64_t>("cq_size", 'g', "size of complete queue", false, 64);
         cmd_parser.add<uint64_t>("mem_size", 'i', "size of pm_file", false, (1ul << 30) * 50);
         cmd_parser.add<uint64_t>("num_op", 'j', "Number of inserted key by every thread", false, 1000000);
-        cmd_parser.add<uint64_t>("num_coro", 'k', "Number of coro", false, 4, cmdline::range(1, 80));
+        cmd_parser.add<uint64_t>("num_coro", 'k', "Number of coro", false, 4, cmdline::range(1, 256));
         cmd_parser.add<uint64_t>("machine_id", 'l', "machine_id", false, 0, cmdline::range(0, 10));
         cmd_parser.add<uint64_t>("pattern_type", 'm', "pattern_type", false, 0, cmdline::range(0, 3));
         cmd_parser.add<double>("insert_frac", 'n', "insert_frac", false, 1.0);

@@ -68,7 +68,8 @@ task<> run(Generator *gen, Client *cli, uint64_t cli_id, uint64_t coro_id)
 {
     co_await cli->start(config.num_machine * config.num_cli * config.num_coro);
     uint64_t tmp_key[key_len];
-    char buffer[8192];
+    // Must hold max value_len used by race_varlen (8192) with headroom
+    char buffer[16384];
     Slice key, value, ret_value, update_value;
 
     ret_value.data = buffer;
@@ -97,7 +98,7 @@ task<> run(Generator *gen, Client *cli, uint64_t cli_id, uint64_t coro_id)
         op_frac = op_chooser();
         if (op_frac < config.insert_frac)
         {
-            // 新 key 按客户端划分、互不重叠，避免并发 insert 撞 key 导致 split 活锁 / MAX_DEPTH
+            // Partition new keys per client to avoid insert collisions / MAX_DEPTH livelock
             GenKey(load_num +
                        (config.machine_id * config.num_cli * config.num_coro + cli_id * config.num_coro + coro_id) *
                            num_op +
@@ -179,14 +180,15 @@ int main(int argc, char *argv[])
     {
         uint64_t cbuf_size = (1ul << 20) * 500;
         char *mem_buf = (char *)malloc(cbuf_size * (config.num_cli * config.num_coro + 1));
-        rdma_dev dev("mlx5_3", 1, config.gid_idx);
+        // bfhost_72 Active IB: mlx5_0
+        rdma_dev dev("mlx5_0", 1, config.gid_idx);
         std::vector<ibv_mr *> lmrs(config.num_cli * config.num_coro + 1, nullptr);
         std::vector<rdma_client *> rdma_clis(config.num_cli + 1, nullptr);
         std::vector<rdma_conn *> rdma_conns(config.num_cli + 1, nullptr);
         std::vector<rdma_conn *> rdma_wowait_conns(config.num_cli + 1, nullptr);
         std::mutex dir_lock;
         std::vector<BasicDB *> clis;
-        std::thread ths[80];
+        std::thread ths[128];
 
         for (uint64_t i = 0; i < config.num_cli; i++)
         {

@@ -2,3 +2,12 @@
 !CMakeLists.txt
 /build
 !*space*.txt
+
+# repro runtime
+repro/__pycache__/
+repro/results/logs/
+repro/results/backup_*/
+repro/results/.monitor_pids
+repro/results/.client_build.sh
+repro/results/.server*
+*.pyc

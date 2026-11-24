@@ -251,7 +251,7 @@ void FilterCache::clear_filter(uint64_t level, uint64_t group_id, uint64_t buc_i
     }
 }
 
-Server::Server(Config &config) : dev(nullptr, 1, config.gid_idx), ser(dev)
+Server::Server(Config &config) : dev("mlx5_2", 1, config.gid_idx), ser(dev)
 {
     log_err("config.mem_size:%lu", config.mem_size);
     seg_mr = dev.reg_mr(233, config.mem_size);

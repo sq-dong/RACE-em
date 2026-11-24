@@ -55,7 +55,8 @@ void PrintDir(Directory *dir)
     }
 }
 
-Server::Server(Config &config) : dev(nullptr, 1, config.gid_idx), ser(dev)
+// memserver16 Active IB: mlx5_2 (nullptr would pick Down mlx5_0)
+Server::Server(Config &config) : dev("mlx5_2", 1, config.gid_idx), ser(dev)
 {
     lmr = dev.reg_mr(233, config.mem_size);
     alloc.Set((char *)lmr->addr, lmr->length);
@@ -848,7 +849,8 @@ task<bool> Client::search_bucket(Slice *key, Slice *value, uintptr_t &slot_ptr, 
 
 task<> Client::remove(Slice *key)
 {
-    char data[1024];
+    // search_bucket memcpy's the full value here; must fit max varlen (Fig.13 up to 8KB)
+    char data[16384];
     Slice ret_value;
     ret_value.data = data;
     uint64_t cnt=0;
@@ -884,7 +886,8 @@ Retry:
 
 task<> Client::update(Slice *key,Slice *value)
 {
-    char data[1024];
+    // search_bucket memcpy's the full value here; must fit max varlen (Fig.13 up to 8KB)
+    char data[16384];
     Slice ret_value;
     ret_value.data = data;
     KVBlock *kv_block = InitKVBlock(key, value, &alloc);

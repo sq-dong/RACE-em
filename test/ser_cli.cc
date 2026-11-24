@@ -93,8 +93,8 @@ task<> run(Generator *gen, Client *cli, uint64_t cli_id, uint64_t coro_id)
         op_frac = op_chooser();
         if (op_frac < config.insert_frac)
         {
-            // 新 key 必须按 (machine,cli,coro) 划分且互不重叠；若用 gen() 会多客户端撞 key，
-            // 触发 RACE 并发 split 活锁直至 Exceed MAX_DEPTH。
+            // Partition new keys by (machine,cli,coro); gen() collides across clients
+            // and can livelock RACE concurrent split until Exceed MAX_DEPTH.
             tmp_key = GenKey(
                 load_num +
                 (config.machine_id * config.num_cli * config.num_coro + cli_id * config.num_coro + coro_id) * num_op +
@@ -175,16 +175,15 @@ int main(int argc, char *argv[])
     {
         uint64_t cbuf_size = (1ul << 20) * 250;
         char *mem_buf = (char *)malloc(cbuf_size * (config.num_cli * config.num_coro + 1));
-        // rdma_dev dev("mlx5_1", 1, config.gid_idx);
-        rdma_dev dev("mlx5_3", 1, config.gid_idx);
-        // rdma_dev dev(nullptr, 1, config.gid_idx);
+        // bfhost_72 Active IB: mlx5_0 (not mlx5_3 — that is memserver16 RoCE/BF)
+        rdma_dev dev("mlx5_0", 1, config.gid_idx);
         std::vector<ibv_mr *> lmrs(config.num_cli * config.num_coro + 1, nullptr);
         std::vector<rdma_client *> rdma_clis(config.num_cli + 1, nullptr);
         std::vector<rdma_conn *> rdma_conns(config.num_cli + 1, nullptr);
         std::vector<rdma_conn *> rdma_wowait_conns(config.num_cli + 1, nullptr);
         std::mutex dir_lock;
         std::vector<BasicDB *> clis;
-        std::thread ths[80];
+        std::thread ths[128];
 
         for (uint64_t i = 0; i < config.num_cli; i++)
         {
@@ -254,7 +253,7 @@ int main(int argc, char *argv[])
         fflush(stdout);
         // ths[config.num_cli].join();
 
-        // 打印 entry/space utilization，供复现脚本解析（近似 load factor）
+        // Print entry/space utilization for repro scripts (approx. load factor)
         if (config.machine_id == 0)
         {
             rdma_clis[0]->run(((ClientType *)clis[0])->cal_utilization());

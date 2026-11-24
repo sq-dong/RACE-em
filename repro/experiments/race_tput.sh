@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
-# RACE ATC Fig.11 风格：吞吐 vs client 线程数（insert/search/update/delete 四分图）
+# RACE ATC Fig.11 style: throughput vs client threads (insert/search/update/delete)
+# RESUME=1: keep existing CSV rows; skip completed (op,num_cli) points
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib.sh"
 scale_params
 
 OUT_CSV="$RESULTS_DIR/race_tput.csv"
-# 每次全量重跑时覆盖旧 CSV（保留表头）
-{
-  echo "op,num_cli,num_coro,load_num,num_op,run_mops,run_ms,entry_util,scale"
-} >"$OUT_CSV"
+RESUME="${RESUME:-0}"
+
+if [[ "$RESUME" == "1" && -f "$OUT_CSV" ]]; then
+  log "RESUME=1 keep existing $OUT_CSV"
+else
+  {
+    echo "op,num_cli,num_coro,load_num,num_op,run_mops,run_ms,entry_util,scale"
+  } >"$OUT_CSV"
+fi
+
+have_point() {
+  local op=$1 ncli=$2
+  [[ -f "$OUT_CSV" ]] || return 1
+  awk -F, -v op="$op" -v n="$ncli" 'NR>1 && $1==op && $2==n {found=1} END{exit !found}' "$OUT_CSV"
+}
 
 build_local "$BIN_FIXED"
 sync_and_build_client "$BIN_FIXED"
@@ -29,8 +41,12 @@ for op in "${OPS[@]}"; do
   read -r fi fr fu fd <<<"$(frac_for "$op")"
   for ncli in $CLIENT_SWEEP; do
     tag="${op}_c${ncli}"
+    if have_point "$op" "$ncli"; then
+      log "=== race_tput $tag SKIP (already in CSV) ==="
+      continue
+    fi
     log "=== race_tput $tag ==="
-    # 每个点重启 server，避免长跑后 accept 僵死 / 端口异常
+    # Restart server per point to avoid stale accept / port issues
     start_server "$BIN_FIXED"
     logfile="$RESULTS_DIR/logs/race_tput_${tag}.log"
     run_client_retry "$logfile" "$BIN_FIXED" \

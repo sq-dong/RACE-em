@@ -37,7 +37,7 @@ void print_bit_map(uint64_t* fp_bitmap){
     }
 }
 
-Server::Server(Config &config) : dev(nullptr, 1, config.gid_idx), ser(dev)
+Server::Server(Config &config) : dev("mlx5_2", 1, config.gid_idx), ser(dev)
 {
     seg_mr = dev.reg_mr(233, config.mem_size);
     auto [dm, mr] = dev.reg_dmmr(234, dev_mem_size);

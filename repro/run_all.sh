@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 一键复现 RACE（SepHash 实现）可复现实验并出图。
+# Run RACE (SepHash tree) reproducible experiments and plot figures.
 #
-# 用法：
-#   SCALE=smoke   ./run_all.sh              # 冒烟（分钟级）
-#   SCALE=medium  ./run_all.sh              # 默认，小时级
-#   SCALE=paper   ./run_all.sh              # 尽量对齐论文量级（可能十余小时）
+# Usage:
+#   SCALE=smoke   ./run_all.sh              # quick check (minutes)
+#   SCALE=medium  ./run_all.sh              # default, hours
+#   SCALE=paper   ./run_all.sh              # paper-scale (may take >10h)
 #   EXPTS="race_tput race_ycsb" ./run_all.sh
 #   ./run_all.sh --plot-only
 #
@@ -31,8 +31,12 @@ declare -A EXPT_SCRIPT=(
 
 if [[ "$PLOT_ONLY" -eq 0 ]]; then
   log "==== SepHash/RACE repro START scale=$SCALE expts=[$EXPTS] ===="
-  log "SRV_IP=$SRV_IP CLT_HOST=$CLT_HOST MEM_SIZE=$MEM_SIZE"
-  chmod +x "$REPRO_DIR"/experiments/*.sh "$REPRO_DIR"/run_all.sh || true
+  log "SRV_IP=$SRV_IP CLT_HOST=$CLT_HOST MEM_SIZE=$MEM_SIZE SRV_IBDEV=$SRV_IBDEV CLT_IBDEV=$CLT_IBDEV"
+  chmod +x "$REPRO_DIR"/experiments/*.sh "$REPRO_DIR"/run_all.sh "$REPRO_DIR"/check_env.sh || true
+  preflight || {
+    log "preflight failed; set SKIP_PREFLIGHT=1 to override"
+    exit 1
+  }
 
   failed=()
   for ex in $EXPTS; do
